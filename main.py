@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -164,7 +165,7 @@ def handle_message(event):
                 messages.append(f"{uname} さん: {total:,} 円\n" + "\n".join(detail_lines))
 
             reply = "【途中結果】\n" + "\n\n".join(messages)
-
+            
     elif first_line == "catch" and group_id:
         # catchコマンドの処理
         pasted_text = "\n".join(lines[1:]).strip()
@@ -172,38 +173,51 @@ def handle_message(event):
             reply = f"{user_name}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください。"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
-
+    
         data = load_data()
         if group_id not in data:
             data[group_id] = {"users": {}}
         if "users" not in data[group_id]:
             data[group_id]["users"] = {}
-
+    
         # ユーザーデータ抽出（名前＋合計＋内訳）
         user_blocks = re.split(r'\n(?=[^\s].+ さん: \d[\d,]* 円)', pasted_text)
-
+    
+        # 既存の user_id → display_name 対応を取得
+        uid_name_map = {}
+        try:
+            members = data[group_id]["users"].keys()
+            for uid in members:
+                if uid != "不明なユーザー":
+                    profile = line_bot_api.get_group_member_profile(group_id, uid)
+                    uname = profile.display_name
+                    uid_name_map[uname] = uid
+        except:
+            pass
+    
         total_added = 0
         for block in user_blocks:
             lines_block = block.strip().split("\n")
             if not lines_block:
                 continue
-
+    
             header = lines_block[0].strip()
             m = re.match(r"(.+?) さん: ([\d,]+) 円", header)
             if not m:
                 continue
             uname = m.group(1)
             total = int(m.group(2).replace(",", ""))
-
-            uid = uname  # user_idが不明なので名前をキーにする
-
+    
+            # 既知のユーザー名 → user_id 対応を優先
+            uid = uid_name_map.get(uname, uname)
+    
             if uid not in data[group_id]["users"]:
                 data[group_id]["users"][uid] = {"total": 0, "details": {}}
             data[group_id]["users"][uid]["total"] += total
             total_added += total
-
+    
             details = data[group_id]["users"][uid]["details"]
-
+    
             for detail_line in lines_block[1:]:
                 dm = re.match(r"　- (.+?): ([\d,]+) 円", detail_line.strip())
                 if dm:
@@ -212,10 +226,10 @@ def handle_message(event):
                     if usage not in details:
                         details[usage] = 0
                     details[usage] += amount
-
+    
         save_data(data)
-
-        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に追加しました。"
+    
+        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました。"
 
     elif len(lines) >= 2:
         # 支出記録の通常処理
@@ -261,6 +275,19 @@ def handle_message(event):
         else:
             reply = f"{user_name}さん、支出金額 {share_amount:,} 円（用途：{usage}）で記録したよ！"
 
+    elif first_line == "help":
+        reply = (
+            "📘 【記載方法】\n"
+            "・1行目: 支出金額_半角数字のみ（必須）\n"
+            "・2行目: 使用用途_自由文字（必須）\n"
+            "・3行目: 割り勘人数_半角数字のみ（任意）\n"
+            "📘 【コマンド一覧】\n"
+            "・check: 自分の途中結果を確認\n"
+            "・check_all: グループ全体の途中結果を確認\n"
+            "・catch: 二行目以降にcheck_allの出力を書き、送信することで再起動前の結果を引き継ぐ\n"
+            "・debug: 5分おきに集計（デバッグ用、ON/OFF切替）"
+        )
+
     else:
         reply = f"{user_name}さん、コマンドが認識できません。help と入力して使い方を確認してください。"
 
@@ -271,3 +298,8 @@ async def root():
     return {"status": "ok"}
 
 scheduler = AsyncIOScheduler()
+
+@app.on_event("startup")
+async def startup_event():
+    scheduler.start()
+    scheduler.add_job(notify_and_reset, CronTrigger(day=1, hour=9, minute=0))
