@@ -2,7 +2,7 @@ services:
   - type: web
     name: line-groupbot
     env: python3
-    instanceType: free-tier
+    plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn main:app"
     envVars:
