@@ -8,7 +8,6 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-# asyncioのイベントループがない場合は作成してセット
 try:
     asyncio.get_running_loop()
 except RuntimeError:
@@ -17,7 +16,6 @@ except RuntimeError:
 
 app = FastAPI()
 
-# 環境変数からトークン取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
@@ -25,9 +23,8 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
-debug_mode = false
+debug_mode = False
 
-# データ保存と読み込み
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -36,19 +33,27 @@ def load_data():
 
 def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
-# 合計通知＋リセット
+def get_group_total(group_info):
+    # group_info["users"] の値を全部足す
+    return sum(group_info.get("users", {}).values())
+
 def notify_and_reset():
     data = load_data()
     for group_id, info in data.items():
-        total = info.get("total", 0)
+        total = get_group_total(info)
         if total > 0:
-            line_bot_api.push_message(group_id, TextSendMessage(text=f"今月の支出合計は {total} 円です！リセットします。"))
-        data[group_id]["total"] = 0
+            line_bot_api.push_message(
+                group_id,
+                TextSendMessage(text=f"今月の支出合計は {total} 円です！リセットします。")
+            )
+        # 支出リセット（ユーザーごとに）
+        if "users" in info:
+            for user_id in info["users"]:
+                info["users"][user_id] = 0
     save_data(data)
 
-# debug通知（5分ごと）
 async def debug_notify():
     while debug_mode:
         await asyncio.sleep(300)
@@ -73,8 +78,7 @@ def handle_message(event):
     user_id = event.source.user_id
     group_id = getattr(event.source, "group_id", None)
 
-    # ユーザー名の取得
-    user_name = "大橋"
+    user_name = "不明なユーザー"
     try:
         if group_id:
             profile = line_bot_api.get_group_member_profile(group_id, user_id)
@@ -84,18 +88,22 @@ def handle_message(event):
     except:
         pass
 
-    if first_line == "==1":
+    if first_line == "nito_debug":
         if not debug_mode:
             debug_mode = True
             asyncio.create_task(debug_notify())
         reply = f"{user_name}さん、デバッグモード（5分ごと通知）を開始したよ！"
-    
-    # 追加: 「途中経過」メッセージ対応
+
     elif first_line == "途中経過":
         data = load_data()
         if group_id and group_id in data:
-            total = data[group_id].get("total", 0)
-            reply = f"{user_name}さん、現時点の支出合計は {total} 円です。"
+            group_info = data[group_id]
+            user_spending = group_info.get("users", {}).get(user_id, 0)
+            total = get_group_total(group_info)
+            reply = (
+                f"{user_name}さん、あなたの支出は {user_spending} 円です。\n"
+                f"グループ全体の合計は {total} 円です。"
+            )
         else:
             reply = f"{user_name}さん、まだ支出の記録がありません。"
 
@@ -104,8 +112,12 @@ def handle_message(event):
         if group_id:
             data = load_data()
             if group_id not in data:
-                data[group_id] = {"total": 0}
-            data[group_id]["total"] += amount
+                data[group_id] = {"users": {}}
+            if "users" not in data[group_id]:
+                data[group_id]["users"] = {}
+            if user_id not in data[group_id]["users"]:
+                data[group_id]["users"][user_id] = 0
+            data[group_id]["users"][user_id] += amount
             save_data(data)
         reply = f"{user_name}さん、支出金額を{amount}円で記録したよ！"
     else:
@@ -120,11 +132,9 @@ def handle_message(event):
 async def root():
     return {"status": "ok"}
 
-# schedulerは1回だけ作成
 scheduler = AsyncIOScheduler()
 scheduler.add_job(notify_and_reset, CronTrigger(day=1, hour=9, minute=0))
 
-# FastAPIの起動時にschedulerを開始
 @app.on_event("startup")
 async def start_scheduler():
     scheduler.start()
