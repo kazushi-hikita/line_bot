@@ -30,14 +30,18 @@ def handle_message(event):
     user_id = event.source.user_id
 
     try:
-        # グループIDを取得（グループチャットの場合）
-        group_id = event.source.group_id
+        source_type = event.source.type
+        if source_type == "group":
+            group_id = event.source.group_id
+            profile = line_bot_api.get_group_member_profile(group_id, user_id)
+        elif source_type == "room":
+            room_id = event.source.room_id
+            profile = line_bot_api.get_room_member_profile(room_id, user_id)
+        else:  # "user" = 個人チャット
+            profile = line_bot_api.get_profile(user_id)
 
-        # ユーザー名を取得
-        profile = line_bot_api.get_group_member_profile(group_id, user_id)
         user_name = profile.display_name
     except Exception:
-        # 何か問題があれば匿名扱い
         user_name = "大橋"
 
     if first_line.isdigit():
@@ -49,6 +53,7 @@ def handle_message(event):
         event.reply_token,
         TextSendMessage(text=reply_text)
     )
+
 
 @app.get("/uptimerobot")
 async def root():
