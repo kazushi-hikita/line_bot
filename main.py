@@ -35,23 +35,29 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-def get_group_total(group_info):
-    # group_info["users"] の値を全部足す
-    return sum(group_info.get("users", {}).values())
-
 def notify_and_reset():
     data = load_data()
     for group_id, info in data.items():
-        total = get_group_total(info)
-        if total > 0:
-            line_bot_api.push_message(
-                group_id,
-                TextSendMessage(text=f"今月の支出合計は {total} 円です！リセットします。")
-            )
+        if "users" not in info or not info["users"]:
+            continue
+
+        for user_id, amount in info["users"].items():
+            if amount > 0:
+                try:
+                    profile = line_bot_api.get_group_member_profile(group_id, user_id)
+                    user_name = profile.display_name
+                except:
+                    user_name = "不明なユーザー"
+
+                line_bot_api.push_message(
+                    group_id,
+                    TextSendMessage(text=f"{user_name}さんの今月の支出は {amount} 円です。")
+                )
+
         # 支出リセット（ユーザーごとに）
-        if "users" in info:
-            for user_id in info["users"]:
-                info["users"][user_id] = 0
+        for user_id in info["users"]:
+            info["users"][user_id] = 0
+
     save_data(data)
 
 async def debug_notify():
@@ -74,7 +80,10 @@ def handle_message(event):
     global debug_mode
 
     text = event.message.text.strip()
-    first_line = text.split("\n")[0]
+    lines = text.split("\n")
+    first_line = lines[0]
+    second_line = lines[1] if len(lines) > 1 else ""
+
     user_id = event.source.user_id
     group_id = getattr(event.source, "group_id", None)
 
@@ -99,13 +108,48 @@ def handle_message(event):
         if group_id and group_id in data:
             group_info = data[group_id]
             user_spending = group_info.get("users", {}).get(user_id, 0)
-            total = get_group_total(group_info)
-            reply = (
-                f"{user_name}さん、あなたの支出は {user_spending} 円です。\n"
-                f"グループ全体の合計は {total} 円です。"
-            )
+            reply = f"{user_name}さん、あなたの支出は {user_spending} 円です。"
         else:
             reply = f"{user_name}さん、まだ支出の記録がありません。"
+
+    # 割り勘処理
+    elif first_line.isdigit() and second_line == "割り勘" and group_id:
+        total_amount = int(first_line)
+        try:
+            members = []
+            next_page_token = None
+            while True:
+                response = line_bot_api.get_group_members_ids(group_id, start=next_page_token)
+                members.extend(response.member_ids)
+                next_page_token = response.next
+                if not next_page_token:
+                    break
+
+            num_members = len(members)
+            if num_members == 0:
+                reply = "グループのメンバー数が取得できませんでした。"
+            else:
+                share = total_amount // num_members
+
+                data = load_data()
+                if group_id not in data:
+                    data[group_id] = {"users": {}}
+                if "users" not in data[group_id]:
+                    data[group_id]["users"] = {}
+
+                for member_id in members:
+                    if member_id not in data[group_id]["users"]:
+                        data[group_id]["users"][member_id] = 0
+                    data[group_id]["users"][member_id] += share
+
+                save_data(data)
+                reply = (
+                    f"{user_name}さん、割り勘で合計 {total_amount} 円を"
+                    f"グループメンバー {num_members} 人で分割しました。\n"
+                    f"一人当たり {share} 円ずつ加算しました。"
+                )
+        except Exception as e:
+            reply = f"割り勘処理でエラーが発生しました: {str(e)}"
 
     elif first_line.isdigit():
         amount = int(first_line)
