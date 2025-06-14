@@ -18,7 +18,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
-debug_mode = False
+debug_mode = True
 
 # データ保存と読み込み
 def load_data():
