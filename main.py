@@ -13,7 +13,7 @@ def handle_message(event):
         user_name = profile.display_name
     except Exception:
         # 何か問題があれば匿名扱い
-        user_name = "匿名さん"
+        user_name = "大橋"
 
     if first_line.isdigit():
         reply_text = f"{user_name}さん、支出金額を{first_line}円で記録したよ！"
