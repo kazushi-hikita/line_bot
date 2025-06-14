@@ -54,7 +54,6 @@ def notify_and_reset():
                     TextSendMessage(text=f"{user_name}さんの今月の支出は {amount} 円です。")
                 )
 
-        # 支出リセット（ユーザーごとに）
         for user_id in info["users"]:
             info["users"][user_id] = 0
 
@@ -97,7 +96,33 @@ def handle_message(event):
     except:
         pass
 
-    if first_line == "nito_debug":
+    # helpコマンド
+    if first_line.lower() == "help":
+        reply = (
+            "📘 Botコマンド一覧\n"
+            "\n"
+            "①【金額だけ送信】\n"
+            "　→ 送信者の支出として記録されます。\n"
+            "\n"
+            "②【金額 + 改行 + 割り勘】\n"
+            "　→ グループ全体で割り勘して、全員の支出に加算されます。\n"
+            "\n"
+            "③【金額 + 改行 + 人数（数値）】\n"
+            "　→ 指定人数で割り勘し、ランダムな記録者に割り当てられます。\n"
+            "\n"
+            "④【途中経過】\n"
+            "　→ 自分の今月の支出を確認できます。\n"
+            "\n"
+            "⑤【nito_rebuild】\n"
+            "　→ グループ全体の途中結果（メンバーごとの合計）を表示。\n"
+            "\n"
+            "⑥【nito_debug】\n"
+            "　→ 5分おきに合計支出を通知するデバッグモードを開始します。\n"
+            "\n"
+            "📝月初1日 9:00 に自動で支出をまとめて通知・リセットされます。"
+        )
+
+    elif first_line == "nito_debug":
         if not debug_mode:
             debug_mode = True
             asyncio.create_task(debug_notify())
@@ -118,7 +143,7 @@ def handle_message(event):
                     user_name = "不明なユーザー"
                 messages.append(f"{user_name} さん: {amount} 円")
             reply = "【途中結果】\n" + "\n".join(messages)
-    
+
     elif first_line == "途中経過":
         data = load_data()
         if group_id and group_id in data:
@@ -128,24 +153,25 @@ def handle_message(event):
         else:
             reply = f"{user_name}さん、まだ支出の記録がありません。"
 
-    # 割り勘処理
-    elif first_line.isdigit() and second_line == "割り勘" and group_id:
+    # 割り勘（人数指定）
+    elif first_line.isdigit() and second_line.isdigit() and group_id:
         total_amount = int(first_line)
+        specified_count = int(second_line)
+
         try:
             members = []
             next_page_token = None
             while True:
-                response = line_bot_api.get_group_members_ids(group_id, start=next_page_token)
+                response = line_bot_api.get_group_member_ids(group_id, start=next_page_token)
                 members.extend(response.member_ids)
                 next_page_token = response.next
                 if not next_page_token:
                     break
 
-            num_members = len(members)
-            if num_members == 0:
-                reply = "グループのメンバー数が取得できませんでした。"
+            if specified_count <= 0 or specified_count > len(members):
+                reply = f"人数指定が正しくありません（現在のグループ人数: {len(members)}）"
             else:
-                share = total_amount // num_members
+                share = total_amount // specified_count
 
                 data = load_data()
                 if group_id not in data:
@@ -153,19 +179,22 @@ def handle_message(event):
                 if "users" not in data[group_id]:
                     data[group_id]["users"] = {}
 
-                for member_id in members:
+                for i in range(specified_count):
+                    member_id = members[i % len(members)]
                     if member_id not in data[group_id]["users"]:
                         data[group_id]["users"][member_id] = 0
                     data[group_id]["users"][member_id] += share
 
                 save_data(data)
                 reply = (
-                    f"{user_name}さん、割り勘で合計 {total_amount} 円を"
-                    f"グループメンバー {num_members} 人で分割しました。\n"
-                    f"一人当たり {share} 円ずつ加算しました。"
+                    f"{user_name}さん、{specified_count}人で割り勘して"
+                    f"一人あたり {share} 円ずつ加算しました。"
                 )
         except Exception as e:
             reply = f"割り勘処理でエラーが発生しました: {str(e)}"
+
+    elif first_line == "0":
+        reply = f"{user_name}さん、0円では記録できません。"
 
     elif first_line.isdigit():
         amount = int(first_line)
@@ -180,6 +209,7 @@ def handle_message(event):
             data[group_id]["users"][user_id] += amount
             save_data(data)
         reply = f"{user_name}さん、支出金額を{amount}円で記録したよ！"
+
     else:
         reply = f"{user_name}さん、他所で話してくれや。"
 
