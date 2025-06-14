@@ -25,7 +25,7 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
-debug_mode = True
+debug_mode = false
 
 # データ保存と読み込み
 def load_data():
@@ -84,12 +84,21 @@ def handle_message(event):
     except:
         pass
 
-    # debugモード開始
     if first_line == "==1":
         if not debug_mode:
             debug_mode = True
             asyncio.create_task(debug_notify())
         reply = f"{user_name}さん、デバッグモード（5分ごと通知）を開始したよ！"
+    
+    # 追加: 「途中経過」メッセージ対応
+    elif first_line == "途中経過":
+        data = load_data()
+        if group_id and group_id in data:
+            total = data[group_id].get("total", 0)
+            reply = f"{user_name}さん、現時点の支出合計は {total} 円です。"
+        else:
+            reply = f"{user_name}さん、まだ支出の記録がありません。"
+
     elif first_line.isdigit():
         amount = int(first_line)
         if group_id:
