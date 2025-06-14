@@ -2,6 +2,7 @@ services:
   - type: web
     name: line-groupbot
     env: python
+    instanceType: free  # ← ここを追加して無料枠を指定
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn main:app"
     envVars:
