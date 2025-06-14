@@ -103,6 +103,22 @@ def handle_message(event):
             asyncio.create_task(debug_notify())
         reply = f"{user_name}さん、デバッグモード（5分ごと通知）を開始したよ！"
 
+    elif first_line == "nito_rebuild" and group_id:
+        data = load_data()
+        if group_id not in data or "users" not in data[group_id] or not data[group_id]["users"]:
+            reply = "まだ支出の記録がありません。"
+        else:
+            users = data[group_id]["users"]
+            messages = []
+            for user_id, amount in users.items():
+                try:
+                    profile = line_bot_api.get_group_member_profile(group_id, user_id)
+                    user_name = profile.display_name
+                except:
+                    user_name = "不明なユーザー"
+                messages.append(f"{user_name} さん: {amount} 円")
+            reply = "【途中結果】\n" + "\n".join(messages)
+    
     elif first_line == "途中経過":
         data = load_data()
         if group_id and group_id in data:
