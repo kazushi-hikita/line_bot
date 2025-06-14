@@ -8,6 +8,13 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+# asyncioのイベントループがない場合は作成してセット
+try:
+    asyncio.get_running_loop()
+except RuntimeError:
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
 app = FastAPI()
 
 # 環境変数からトークン取得
@@ -104,7 +111,11 @@ def handle_message(event):
 async def root():
     return {"status": "ok"}
 
-# 月初自動通知
+# schedulerは1回だけ作成
 scheduler = AsyncIOScheduler()
 scheduler.add_job(notify_and_reset, CronTrigger(day=1, hour=9, minute=0))
-scheduler.start()
+
+# FastAPIの起動時にschedulerを開始
+@app.on_event("startup")
+async def start_scheduler():
+    scheduler.start()
