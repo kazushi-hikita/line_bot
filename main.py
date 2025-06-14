@@ -36,6 +36,6 @@ def handle_message(event):
         TextSendMessage(text=reply_text)
     )
 
-@app.get("/")
+@app.get("/uptimerobot")
 async def root():
     return {"status": "ok"}
