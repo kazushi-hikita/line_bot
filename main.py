@@ -35,3 +35,7 @@ def handle_message(event):
         event.reply_token,
         TextSendMessage(text=reply_text)
     )
+
+@app.get("/")
+async def root():
+    return {"status": "ok"}
