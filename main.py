@@ -30,6 +30,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
 debug_mode = False
+debug_task = None
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -70,7 +71,7 @@ def notify_and_reset():
             total = user_info.get("total", 0)
             details = user_info.get("details", {})
             detail_lines = [f"　- {k}: {v:,} 円" for k, v in details.items()]
-            message = f"【{last_month_str}結果発表】\n{user_name}さんの今月の支出は {total:,} 円です。\n内訳:\n" + "\n".join(detail_lines)
+            message = f"【{last_month_str}結果発表】\n{user_name}さんの今月の支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
             line_bot_api.push_message(group_id, TextSendMessage(text=message))
 
         # リセット
@@ -80,10 +81,18 @@ def notify_and_reset():
 
     save_data(data)
 
+def clear_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump({}, f, ensure_ascii=False, indent=2)
+
 async def debug_notify():
-    while debug_mode:
-        await asyncio.sleep(300)
-        notify_and_reset()
+    try:
+        while True:
+            await asyncio.sleep(300)
+            notify_and_reset()
+    except asyncio.CancelledError:
+        print("Debug task cancelled.")
+
 
 @app.post("/callback")
 async def callback(request: Request):
@@ -122,13 +131,21 @@ def handle_message(event):
         first_line = ""
 
     if first_line == "debug":
-        # ON/OFF切替
-        debug_mode = not debug_mode
-        if debug_mode:
-            asyncio.create_task(debug_notify())
-            reply = f"{user_name}さん、デバッグモード（5分ごと通知）を開始しました。"
+        global debug_mode, debug_task
+    
+        was_debug = debug_mode  # 変更前の状態を保持
+        debug_mode = not debug_mode  # 状態を切り替え
+    
+        if was_debug:
+            # 停止処理
+            if debug_task and not debug_task.done():
+                debug_task.cancel()
+            clear_data()
+            reply = f"{user_name}さん、デバッグモード停止。記録データをすべてリセット。"
         else:
-            reply = f"{user_name}さん、デバッグモードを停止しました。"
+            # 開始処理
+            debug_task = asyncio.create_task(debug_notify())
+            reply = f"{user_name}さん、デバッグモード（5分ごと通知）を開始。"
 
     elif first_line == "check":
         data = load_data()
@@ -137,14 +154,14 @@ def handle_message(event):
             total = user_info.get("total", 0)
             details = user_info.get("details", {})
             detail_lines = [f"　- {k}: {v:,} 円" for k, v in details.items()]
-            reply = f"{user_name}さん、あなたの支出は {total:,} 円です。\n内訳:\n" + "\n".join(detail_lines)
+            reply = f"{user_name}さん、あなたの支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
         else:
-            reply = f"{user_name}さん、まだ支出の記録がありません。"
+            reply = f"{user_name}さん、まだ支出の記録がありません、、"
 
     elif first_line == "check_all" and group_id:
         data = load_data()
         if group_id not in data or "users" not in data[group_id] or not data[group_id]["users"]:
-            reply = "まだ支出の記録がありません。"
+            reply = "まだ支出の記録がありません、、"
         else:
             users = data[group_id]["users"]
             user_list = []
@@ -170,7 +187,7 @@ def handle_message(event):
         # catchコマンドの処理
         pasted_text = "\n".join(lines[1:]).strip()
         if not pasted_text:
-            reply = f"{user_name}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください。"
+            reply = f"{user_name}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
     
@@ -219,7 +236,7 @@ def handle_message(event):
             details = data[group_id]["users"][uid]["details"]
     
             for detail_line in lines_block[1:]:
-                dm = re.match(r"　- (.+?): ([\d,]+) 円", detail_line.strip())
+                dm = re.match(r"[-ー・\s]*\s*(.+?):\s*([\d,]+)\s*円", detail_line.strip())
                 if dm:
                     usage = dm.group(1)
                     amount = int(dm.group(2).replace(",", ""))
@@ -229,7 +246,7 @@ def handle_message(event):
     
         save_data(data)
     
-        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました。"
+        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
 
     elif len(lines) >= 2:
         # 支出記録の通常処理
@@ -238,11 +255,11 @@ def handle_message(event):
         third_line = lines[2].strip() if len(lines) >= 3 else ""
 
         if not first_line.isdigit():
-            reply = f"{user_name}さん、1行目は半角数字で金額を入力してください。"
+            reply = f"{user_name}さん、1行目は半角数字で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
         if not usage:
-            reply = f"{user_name}さん、2行目は使用用途を必ず入力してください。"
+            reply = f"{user_name}さん、2行目は使用用途を必ず入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
@@ -270,10 +287,10 @@ def handle_message(event):
         if share_count > 1:
             reply = (
                 f"{user_name}さん、{amount:,} 円を {share_count} 人で割り勘し、"
-                f"1人あたり {share_amount:,} 円（用途：{usage}）で記録しました。"
+                f"1人あたり {share_amount:,} 円（用途：{usage}）で記録しました！"
             )
         else:
-            reply = f"{user_name}さん、支出金額 {share_amount:,} 円（用途：{usage}）で記録したよ！"
+            reply = f"{user_name}さん、支出金額 {share_amount:,} 円（用途：{usage}）で記録しました！"
 
     elif first_line == "help":
         reply = (
@@ -289,7 +306,7 @@ def handle_message(event):
         )
 
     else:
-        reply = f"{user_name}さん、コマンドが認識できません。help と入力して使い方を確認してください。"
+        reply = f"{user_name}さん、コマンドが認識できません。help と入力して使い方を確認してください、、"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
