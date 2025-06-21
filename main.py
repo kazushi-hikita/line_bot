@@ -114,6 +114,23 @@ async def callback(request: Request):
         return "Invalid signature", 400
     return "OK"
 
+@handler.add(JoinEvent)
+def handle_join(event):
+    group_id = event.source.group_id
+    # グループにBotが招待されたときの初回メッセージ
+    welcome_message = (
+        "こんにちは！支出記録Botです💰\n\n"
+        "このグループでの支出を記録していきます。\n\n"
+        "まずは皆さんのニックネームを教えてください！\n"
+        "1人ずつこのチャットでニックネームを送ってください。\n"
+        "全員の入力が終わったら「終了」と送信してください。"
+    )
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=welcome_message)
+    )
+
+
 # --- グループにメンバー参加時 ---
 @handler.add(MemberJoinedEvent)
 def handle_member_join(event):
