@@ -1,14 +1,8 @@
 from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent,
-    TextMessage,
-    TextSendMessage,
-    MemberJoinedEvent,
-    MemberLeftEvent,
-    JoinEvent,
-)
+from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import os
 import json
 import asyncio
@@ -35,29 +29,9 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
-NICKNAME_FILE = "nicknames.json"
+debug_mode = False
+debug_task = None
 
-# --- ニックネーム管理 ---
-def load_nicknames():
-    if not os.path.exists(NICKNAME_FILE):
-        return {}
-    with open(NICKNAME_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-def save_nicknames(data):
-    with open(NICKNAME_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-nicknames = load_nicknames()
-
-# グループごとのニックネーム登録待ちフラグ管理
-# 例: waiting_for_nicknames = { group_id: True/False }
-waiting_for_nicknames = {}
-
-# まだ登録していないユーザーIDリストをグループ毎に管理
-pending_users = {}  # { group_id: set(user_id, ...) }
-
-# --- 支出データ管理 ---
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -68,7 +42,6 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# --- 毎月1日に集計して通知しリセット ---
 def notify_and_reset():
     data = load_data()
     now = datetime.now()
@@ -80,8 +53,16 @@ def notify_and_reset():
             continue
 
         user_list = []
-        for user_key, user_info in info["users"].items():
-            user_list.append((user_key, user_info))
+        for user_id, user_info in info["users"].items():
+            try:
+                if group_id:
+                    profile = line_bot_api.get_group_member_profile(group_id, user_id) if user_id != "不明なユーザー" else None
+                    user_name = profile.display_name if profile else user_id
+                else:
+                    user_name = user_id
+            except:
+                user_name = user_id
+            user_list.append((user_name, user_info))
         user_list.sort(key=lambda x: x[0])
 
         for user_name, user_info in user_list:
@@ -93,10 +74,9 @@ def notify_and_reset():
             message = f"【{last_month_str}結果発表】\n{user_name}さんの今月の支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
             line_bot_api.push_message(group_id, TextSendMessage(text=message))
 
-        # リセット
-        for user_key in info["users"]:
-            info["users"][user_key]["total"] = 0
-            info["users"][user_key]["details"] = {}
+        for user_id in info["users"]:
+            info["users"][user_id]["total"] = 0
+            info["users"][user_id]["details"] = {}
 
     save_data(data)
 
@@ -104,7 +84,14 @@ def clear_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({}, f, ensure_ascii=False, indent=2)
 
-# --- Webhookエンドポイント ---
+async def debug_notify():
+    try:
+        while True:
+            await asyncio.sleep(300)
+            notify_and_reset()
+    except asyncio.CancelledError:
+        print("Debug task cancelled.")
+
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
@@ -115,121 +102,47 @@ async def callback(request: Request):
         return "Invalid signature", 400
     return "OK"
 
-@handler.add(JoinEvent)
-def handle_join(event):
-    group_id = event.source.group_id
-    # グループにBotが招待されたときの初回メッセージ
-    welcome_message = (
-        "こんにちは！支出記録Botです💰\n\n"
-        "このグループでの支出を記録していきます。\n\n"
-        "まずは皆さんのニックネームを教えてください！\n"
-        "1人ずつこのチャットでニックネームを送ってください。\n"
-        "全員の入力が終わったら「終了」と送信してください。"
-    )
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=welcome_message)
-    )
-
-
-# --- グループにメンバー参加時 ---
-@handler.add(MemberJoinedEvent)
-def handle_member_join(event):
-    group_id = event.source.group_id
-    if group_id is None:
-        return
-
-    # pending_users 初期化
-    if group_id not in pending_users:
-        pending_users[group_id] = set()
-
-    # 参加メンバーを pending_users に追加（ニックネーム未登録なら）
-    for member in event.joined.members:
-        user_id = member.user_id
-        if user_id not in nicknames:
-            pending_users[group_id].add(user_id)
-
-    if pending_users[group_id]:
-        waiting_for_nicknames[group_id] = True
-        line_bot_api.push_message(
-            group_id,
-            TextSendMessage(
-                text="皆さんのニックネームを教えてください！\n全員の入力が終わったら「終了」と送信してください。"
-            ),
-        )
-
-# --- グループからメンバー退出時(未登録者リストから除外) ---
-@handler.add(MemberLeftEvent)
-def handle_member_left(event):
-    group_id = event.source.group_id
-    user_id = event.source.user_id
-    if group_id in pending_users:
-        pending_users[group_id].discard(user_id)
-
-# --- メッセージ受信時 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    global debug_mode, debug_task
+
     text = event.message.text.strip()
+    lines = text.split("\n")
+
     user_id = event.source.user_id
     group_id = getattr(event.source, "group_id", None)
 
-    # ニックネーム登録待ちモードかつ未登録ユーザーならニックネーム登録処理
-    if group_id and waiting_for_nicknames.get(group_id, False) and user_id in pending_users.get(group_id, set()):
-        if text == "終了":
-            # 「終了」は全員の登録が終わったことの明示
-            if pending_users[group_id]:
-                reply = (
-                    f"まだ登録していない人がいます。未登録者数: {len(pending_users[group_id])}人。\n"
-                    "全員の登録が終わるまでお待ちください。"
-                )
-            else:
-                waiting_for_nicknames[group_id] = False
-                reply = "ニックネーム登録を終了しました！ありがとうございます。"
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-            return
+    user_name = "不明なユーザー"
+    try:
+        if group_id:
+            profile = line_bot_api.get_group_member_profile(group_id, user_id)
+        else:
+            profile = line_bot_api.get_profile(user_id)
+        user_name = profile.display_name
+    except:
+        pass
 
-        # ニックネーム重複チェック（簡易）
-        if text in nicknames.values():
-            reply = "そのニックネームは既に使われています。別のニックネームを教えてください。"
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-            return
-
-        # 登録
-        nicknames[user_id] = text
-        save_nicknames(nicknames)
-        pending_users[group_id].discard(user_id)
-        reply = f"ニックネーム「{text}」を登録しました！"
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
-
-        # 未登録者がいなくなったらモード終了
-        if not pending_users[group_id]:
-            waiting_for_nicknames[group_id] = False
-            line_bot_api.push_message(group_id, TextSendMessage(text="全員のニックネーム登録が完了しました！ありがとうございます。"))
-        return
-
-    # --- ニックネーム登録待ちモード外の通常処理 ---
-    # user_id の代わりにニックネームキーを使う
-    user_key = nicknames.get(user_id, user_id)
-
-    lines = text.split("\n")
-    first_line = lines[0].strip() if len(lines) >= 1 else ""
+    if len(lines) >= 1:
+        first_line = lines[0].strip()
+    else:
+        first_line = ""
 
     if first_line == "debug":
         notify_and_reset()
-        reply = f"{user_key}さん、集計を実施しました！（デバッグモードはありません）"
-
+        reply = f"{user_name}さん、集計を実施しました！（デバッグモードではありません）"
+        
     elif first_line == "check":
         data = load_data()
-        if group_id and group_id in data and "users" in data[group_id] and user_key in data[group_id]["users"]:
-            user_info = data[group_id]["users"][user_key]
+        if group_id and group_id in data and "users" in data[group_id] and user_id in data[group_id]["users"]:
+            user_info = data[group_id]["users"][user_id]
             total = user_info.get("total", 0)
             details = user_info.get("details", {})
             detail_lines = [
                 f"　- {k}: {v['total']:,} 円（{v['count']} 回）" for k, v in details.items()
             ]
-            reply = f"{user_key}さん、あなたの支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
+            reply = f"{user_name}さん、あなたの支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
         else:
-            reply = f"{user_key}さん、まだ支出の記録がありません、、"
+            reply = f"{user_name}さん、まだ支出の記録がありません、、"
 
     elif first_line == "check_all" and group_id:
         data = load_data()
@@ -238,8 +151,13 @@ def handle_message(event):
         else:
             users = data[group_id]["users"]
             user_list = []
-            for key, info in users.items():
-                user_list.append((key, info))
+            for uid, info in users.items():
+                try:
+                    profile = line_bot_api.get_group_member_profile(group_id, uid) if uid != "不明なユーザー" else None
+                    uname = profile.display_name if profile else uid
+                except:
+                    uname = uid
+                user_list.append((uname, info))
             user_list.sort(key=lambda x: x[0])
 
             messages = []
@@ -256,7 +174,7 @@ def handle_message(event):
     elif first_line == "catch" and group_id:
         pasted_text = "\n".join(lines[1:]).strip()
         if not pasted_text:
-            reply = f"{user_key}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください、、"
+            reply = f"{user_name}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
@@ -268,10 +186,17 @@ def handle_message(event):
 
         user_blocks = re.split(r'\n(?=[^\s].+ さん: \d[\d,]* 円)', pasted_text)
 
-        # 表示名→user_key のマッピング構築
+        # 表示名→user_id のマッピング構築
         uid_name_map = {}
-        for key in data[group_id]["users"].keys():
-            uid_name_map[key] = key
+        try:
+            members = data[group_id]["users"].keys()
+            for uid in members:
+                if uid != "不明なユーザー":
+                    profile = line_bot_api.get_group_member_profile(group_id, uid)
+                    uname = profile.display_name
+                    uid_name_map[uname] = uid
+        except:
+            pass
 
         total_added = 0
         for block in user_blocks:
@@ -286,6 +211,7 @@ def handle_message(event):
             uname = m.group(1)
             total = int(m.group(2).replace(",", ""))
 
+            # 🔻 user_id を優先的に使用、不明なら "不明なユーザー" として統一
             uid = uid_name_map.get(uname, "不明なユーザー")
 
             if uid not in data[group_id]["users"]:
@@ -307,7 +233,8 @@ def handle_message(event):
 
         save_data(data)
 
-        reply = f"{user_key}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
+        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
+    
 
     elif len(lines) >= 2:
         usage = lines[0].strip()  # 1行目：品目（用途）
@@ -315,45 +242,77 @@ def handle_message(event):
         third_line = lines[2].strip() if len(lines) >= 3 else ""
 
         if not amount_line.isdigit():
-            reply = f"{user_key}さん、2行目は半角数字で金額を入力してください、、"
+            reply = f"{user_name}さん、2行目は半角数字で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
         if not usage:
-            reply = f"{user_key}さん、1行目は使用用途を必ず入力してください、、"
+            reply = f"{user_name}さん、1行目は使用用途を必ず入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
-        share_count = int(third_line) if third_line.isdigit() and int(third_line) > 0 else 1
-
         amount = int(amount_line)
-        share_amount = math.ceil(amount / share_count)
 
         data = load_data()
         if group_id not in data:
             data[group_id] = {"users": {}}
         if "users" not in data[group_id]:
             data[group_id]["users"] = {}
-        if user_key not in data[group_id]["users"]:
-            data[group_id]["users"][user_key] = {"total": 0, "details": {}}
 
-        user_data = data[group_id]["users"][user_key]
-        user_data["total"] += share_amount
+        users = data[group_id]["users"]
 
-        details = user_data["details"]
-        if usage not in details:
-            details[usage] = {"total": 0, "count": 0}
-        details[usage]["total"] += share_amount
-        details[usage]["count"] += 1
+        if third_line == "割り勘":
+            user_ids = list(users.keys())
+            num_users = len(user_ids)
+            if num_users == 0:
+                reply = "このグループにはまだユーザーが登録されていません、、"
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                return
+            share_amount = math.ceil(amount / num_users)
 
-        save_data(data)
+            for uid in user_ids:
+                if uid not in users:
+                    users[uid] = {"total": 0, "details": {}}
+                users[uid]["total"] += share_amount
 
-        if share_count > 1:
+                details = users[uid]["details"]
+                if usage not in details:
+                    details[usage] = {"total": 0, "count": 0}
+                details[usage]["total"] += share_amount
+                details[usage]["count"] += 1
+
+            save_data(data)
+
             reply = (
-                f"{user_key}さん、「{usage}」で {amount:,} 円を {share_count} 人で割り勘し、"
-                f"1人あたり {share_amount:,} 円で記録しました！"
+                f"{user_name}さん、「{usage}」で {amount:,} 円を "
+                f"{num_users} 人で割り勘し、1人あたり {share_amount:,} 円で記録しました！"
             )
         else:
-            reply = f"{user_key}さん、「{usage}」の支出金額 {share_amount:,} 円で記録しました！"
+            # 通常の一人 or 任意人数での登録処理（現状維持）
+            share_count = int(third_line) if third_line.isdigit() and int(third_line) > 0 else 1
+            share_amount = math.ceil(amount / share_count)
+
+            if user_id not in users:
+                users[user_id] = {"total": 0, "details": {}}
+
+            user_data = users[user_id]
+            user_data["total"] += share_amount
+
+            details = user_data["details"]
+            if usage not in details:
+                details[usage] = {"total": 0, "count": 0}
+            details[usage]["total"] += share_amount
+            details[usage]["count"] += 1
+
+            save_data(data)
+
+            if share_count > 1:
+                reply = (
+                    f"{user_name}さん、「{usage}」で {amount:,} 円を {share_count} 人で割り勘し、"
+                    f"1人あたり {share_amount:,} 円で記録しました！"
+                )
+            else:
+                reply = f"{user_name}さん、「{usage}」の支出金額 {share_amount:,} 円で記録しました！"
+
 
     elif first_line == "help":
         reply = (
@@ -364,15 +323,14 @@ def handle_message(event):
             "📘 【コマンド一覧】\n"
             "・check: 自分の途中結果を確認\n"
             "・check_all: グループ全体の途中結果を確認\n"
-            "・debug: 集計実行\n"
-            "※グループ参加時にニックネームを聞かれます。"
+            "・debug: 5分おきに集計（ON/OFF切替）"
         )
+
     else:
         return
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-# 健康チェック用
 @app.get("/uptimerobot")
 async def root():
     return {"status": "ok"}
