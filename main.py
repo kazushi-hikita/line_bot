@@ -7,6 +7,7 @@ from linebot.models import (
     TextSendMessage,
     MemberJoinedEvent,
     MemberLeftEvent,
+    JoinEvent,
 )
 import os
 import json
