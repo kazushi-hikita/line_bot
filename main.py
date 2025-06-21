@@ -134,29 +134,57 @@ def handle_message(event):
         if group_id not in data or "users" not in data[group_id] or user_id not in data[group_id]["users"]:
             reply = f"{user_name}さん、取り消せる記録がありません、、"
         else:
-            user_data = data[group_id]["users"][user_id]
+            users = data[group_id]["users"]
+            user_data = users[user_id]
             history = user_data.get("history", [])
             if not history:
                 reply = f"{user_name}さん、取り消せる記録がありません、、"
             else:
-                last = history.pop()  # 最後の履歴を取り出す
-
-                # 合計値から減算
-                user_data["total"] -= last["amount"]
-
-                # detailsからも減算
+                last = history.pop()
                 usage = last["usage"]
+                amount = last["amount"]
+                count = last["count"]
+    
+                # 自分の合計・詳細から減算
+                user_data["total"] -= amount
                 if usage in user_data["details"]:
-                    user_data["details"][usage]["total"] -= last["amount"]
-                    user_data["details"][usage]["count"] -= 1
+                    user_data["details"][usage]["total"] -= amount
+                    user_data["details"][usage]["count"] -= count
                     if user_data["details"][usage]["count"] <= 0:
                         del user_data["details"][usage]
-
+    
+                # --- もし割り勘で複数人に同額加算されていた場合 ---
+                shared_users = []
+                for uid, udata in users.items():
+                    if uid == user_id:
+                        continue
+                    if "history" in udata and udata["history"]:
+                        if udata["history"][-1]["usage"] == usage and udata["history"][-1]["amount"] == amount:
+                            # 一致する履歴があれば削除
+                            shared_users.append(uid)
+                            udata["history"].pop()
+                            udata["total"] -= amount
+                            if usage in udata["details"]:
+                                udata["details"][usage]["total"] -= amount
+                                udata["details"][usage]["count"] -= count
+                                if udata["details"][usage]["count"] <= 0:
+                                    del udata["details"][usage]
+    
                 save_data(data)
-                reply = f"{user_name}さん、直近の支出「{usage}」 {last['amount']:,} 円の登録を取り消しました。"
-
+    
+                if shared_users:
+                    reply = (
+                        f"{user_name}さん、割り勘として登録された「{usage}」 {amount:,} 円の記録を "
+                        f"{len(shared_users)+1}人分まとめて取り消しました。"
+                    )
+                else:
+                    reply = (
+                        f"{user_name}さん、直近の支出「{usage}」 {amount:,} 円の登録を取り消しました。"
+                    )
+    
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         return
+
 
     if first_line == "debug":
         notify_and_reset()
