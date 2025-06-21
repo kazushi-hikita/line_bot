@@ -188,7 +188,6 @@ def handle_message(event):
 
     if first_line == "debug":
         notify_and_reset()
-        reply = f"{user_name}さん、集計を実施しました！（デバッグモードではありません）"
 
     elif first_line == "check":
         data = load_data()
