@@ -77,6 +77,7 @@ def notify_and_reset():
         for user_id in info["users"]:
             info["users"][user_id]["total"] = 0
             info["users"][user_id]["details"] = {}
+            info["users"][user_id]["history"] = []
 
     save_data(data)
 
@@ -127,10 +128,40 @@ def handle_message(event):
     else:
         first_line = ""
 
+    # --- 取り消しコマンド対応 ---
+    if first_line == "取り消し" and group_id:
+        data = load_data()
+        if group_id not in data or "users" not in data[group_id] or user_id not in data[group_id]["users"]:
+            reply = f"{user_name}さん、取り消せる記録がありません、、"
+        else:
+            user_data = data[group_id]["users"][user_id]
+            history = user_data.get("history", [])
+            if not history:
+                reply = f"{user_name}さん、取り消せる記録がありません、、"
+            else:
+                last = history.pop()  # 最後の履歴を取り出す
+
+                # 合計値から減算
+                user_data["total"] -= last["amount"]
+
+                # detailsからも減算
+                usage = last["usage"]
+                if usage in user_data["details"]:
+                    user_data["details"][usage]["total"] -= last["amount"]
+                    user_data["details"][usage]["count"] -= 1
+                    if user_data["details"][usage]["count"] <= 0:
+                        del user_data["details"][usage]
+
+                save_data(data)
+                reply = f"{user_name}さん、直近の支出「{usage}」 {last['amount']:,} 円の登録を取り消しました。"
+
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
     if first_line == "debug":
         notify_and_reset()
         reply = f"{user_name}さん、集計を実施しました！（デバッグモードではありません）"
-        
+
     elif first_line == "check":
         data = load_data()
         if group_id and group_id in data and "users" in data[group_id] and user_id in data[group_id]["users"]:
@@ -211,11 +242,10 @@ def handle_message(event):
             uname = m.group(1)
             total = int(m.group(2).replace(",", ""))
 
-            # 🔻 user_id を優先的に使用、不明なら "不明なユーザー" として統一
             uid = uid_name_map.get(uname, "不明なユーザー")
 
             if uid not in data[group_id]["users"]:
-                data[group_id]["users"][uid] = {"total": 0, "details": {}}
+                data[group_id]["users"][uid] = {"total": 0, "details": {}, "history": []}
             data[group_id]["users"][uid]["total"] += total
             total_added += total
 
@@ -241,12 +271,13 @@ def handle_message(event):
         amount_line = lines[1].strip()  # 2行目：金額
         third_line = lines[2].strip() if len(lines) >= 3 else ""
 
-        if not amount_line.isdigit():
-            reply = f"{user_name}さん、2行目は半角数字で金額を入力してください、、"
+        # マイナスも許可する数字判定（半角数字と先頭にマイナスもOK）
+        if not re.match(r"^-?\d+$", amount_line):
+            reply = "1行目に任意の文字列で品名、2行目に半角数字（マイナス可）で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
         if not usage:
-            reply = f"{user_name}さん、1行目は使用用途を必ず入力してください、、"
+            reply = "1行目に任意の文字列で品名、2行目に半角数字で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
@@ -271,7 +302,7 @@ def handle_message(event):
 
             for uid in user_ids:
                 if uid not in users:
-                    users[uid] = {"total": 0, "details": {}}
+                    users[uid] = {"total": 0, "details": {}, "history": []}
                 users[uid]["total"] += share_amount
 
                 details = users[uid]["details"]
@@ -280,6 +311,15 @@ def handle_message(event):
                 details[usage]["total"] += share_amount
                 details[usage]["count"] += 1
 
+                # 履歴に記録
+                if "history" not in users[uid]:
+                    users[uid]["history"] = []
+                users[uid]["history"].append({
+                    "usage": usage,
+                    "amount": share_amount,
+                    "count": 1
+                })
+
             save_data(data)
 
             reply = (
@@ -287,12 +327,11 @@ def handle_message(event):
                 f"{num_users} 人で割り勘し、1人あたり {share_amount:,} 円で記録しました！"
             )
         else:
-            # 通常の一人 or 任意人数での登録処理（現状維持）
             share_count = int(third_line) if third_line.isdigit() and int(third_line) > 0 else 1
             share_amount = math.ceil(amount / share_count)
 
             if user_id not in users:
-                users[user_id] = {"total": 0, "details": {}}
+                users[user_id] = {"total": 0, "details": {}, "history": []}
 
             user_data = users[user_id]
             user_data["total"] += share_amount
@@ -302,6 +341,13 @@ def handle_message(event):
                 details[usage] = {"total": 0, "count": 0}
             details[usage]["total"] += share_amount
             details[usage]["count"] += 1
+
+            # 履歴に記録
+            user_data["history"].append({
+                "usage": usage,
+                "amount": share_amount,
+                "count": share_count
+            })
 
             save_data(data)
 
@@ -313,17 +359,18 @@ def handle_message(event):
             else:
                 reply = f"{user_name}さん、「{usage}」の支出金額 {share_amount:,} 円で記録しました！"
 
-
     elif first_line == "help":
         reply = (
             "📘 【記載方法】\n"
             "・1行目: 使用用途_自由文字（必須）\n"
-            "・2行目: 支出金額_半角数字のみ（必須）\n"
-            "・3行目: 割り勘人数_半角数字のみ（任意）\n"
+            "・2行目: 支出金額_半角数字（マイナスも可）（必須）\n"
+            "・3行目: 「割り勘」と入力で当月入力履歴のある人に振り分け（任意）\n"
             "📘 【コマンド一覧】\n"
             "・check: 自分の途中結果を確認\n"
             "・check_all: グループ全体の途中結果を確認\n"
-            "・debug: 5分おきに集計（ON/OFF切替）"
+            "・取り消し: 直近の登録を1件取り消す\n"
+            "・debug: 結果発表のデバッグ(全記載内容のクリア)\n"
+            "・catch: バックアップの取得デバッグ"
         )
 
     else:
