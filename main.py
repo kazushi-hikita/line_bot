@@ -265,23 +265,24 @@ def handle_message(event):
 
         reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
     
-
     elif len(lines) >= 2:
         usage = lines[0].strip()  # 1行目：品目（用途）
-        amount_line = lines[1].strip()  # 2行目：金額
+        amount_line_raw = lines[1].strip()  # 2行目：金額
         third_line = lines[2].strip() if len(lines) >= 3 else ""
 
-        # マイナスも許可する数字判定（半角数字と先頭にマイナスもOK）
-        if not re.match(r"^-?\d+$", amount_line):
-            reply = "1行目に任意の文字列で品名、2行目に半角数字（マイナス可）で金額を入力してください、、"
+        # マイナスも許可（--1000形式は特別扱い）
+        is_double_minus = amount_line_raw.startswith("--")
+        amount_line = amount_line_raw.lstrip("-")
+        if not re.match(r"^\d+$", amount_line):
+            reply = "1行目に用途、2行目に半角数字で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
         if not usage:
-            reply = "1行目に任意の文字列で品名、2行目に半角数字で金額を入力してください、、"
+            reply = "1行目に用途、2行目に半角数字で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
-        amount = int(amount_line)
+        amount = -int(amount_line) if amount_line_raw.startswith("-") else int(amount_line)
 
         data = load_data()
         if group_id not in data:
@@ -309,15 +310,15 @@ def handle_message(event):
                 if usage not in details:
                     details[usage] = {"total": 0, "count": 0}
                 details[usage]["total"] += share_amount
-                details[usage]["count"] += 1
 
-                # 履歴に記録
-                if "history" not in users[uid]:
-                    users[uid]["history"] = []
+                # マイナス金額は回数に含めない、--は1減らす
+                count_change = -1 if is_double_minus else (0 if share_amount < 0 else 1)
+                details[usage]["count"] += count_change
+
                 users[uid]["history"].append({
                     "usage": usage,
                     "amount": share_amount,
-                    "count": 1
+                    "count": count_change
                 })
 
             save_data(data)
@@ -326,6 +327,7 @@ def handle_message(event):
                 f"{user_name}さん、「{usage}」で {amount:,} 円を "
                 f"{num_users} 人で割り勘し、1人あたり {share_amount:,} 円で記録しました！"
             )
+
         else:
             share_count = int(third_line) if third_line.isdigit() and int(third_line) > 0 else 1
             share_amount = math.ceil(amount / share_count)
@@ -340,13 +342,15 @@ def handle_message(event):
             if usage not in details:
                 details[usage] = {"total": 0, "count": 0}
             details[usage]["total"] += share_amount
-            details[usage]["count"] += 1
 
-            # 履歴に記録
+            # マイナス金額はカウントに含めない、--は-1
+            count_change = -1 if is_double_minus else (0 if share_amount < 0 else 1)
+            details[usage]["count"] += count_change
+
             user_data["history"].append({
                 "usage": usage,
                 "amount": share_amount,
-                "count": share_count
+                "count": count_change
             })
 
             save_data(data)
@@ -363,12 +367,14 @@ def handle_message(event):
         reply = (
             "📘 【記載方法】\n"
             "・1行目: 使用用途_自由文字（必須）\n"
-            "・2行目: 支出金額_半角数字（マイナスも可）（必須）\n"
+            "・2行目: 支出金額_半角数字（必須）\n"
             "・3行目: 「割り勘」と入力で当月入力履歴のある人に振り分け（任意）\n"
             "📘 【コマンド一覧】\n"
+            "・支出金額「-」付与: 減算\n"
+            "・支出金額「--」付与: 減算かつ加算回数を一つデクリメント\n"
+            "・取り消し: 1件前の登録を取り消す\n"
             "・check: 自分の途中結果を確認\n"
             "・check_all: グループ全体の途中結果を確認\n"
-            "・取り消し: 直近の登録を1件取り消す\n"
             "・debug: 結果発表のデバッグ(全記載内容のクリア)\n"
             "・catch: バックアップの取得デバッグ"
         )
