@@ -1,8 +1,7 @@
 from fastapi import FastAPI, Request
-from fastapi import BackgroundTasks
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, MemberJoinedEvent
 import os
 import json
 import asyncio
@@ -29,9 +28,23 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
-debug_mode = False
-debug_task = None
+NICKNAME_FILE = "nicknames.json"
 
+# ニックネーム管理
+def load_nicknames():
+    if not os.path.exists(NICKNAME_FILE):
+        return {}
+    with open(NICKNAME_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def save_nicknames(data):
+    with open(NICKNAME_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+nicknames = load_nicknames()
+waiting_for_nickname = set()  # ニックネーム入力待ちのuser_id集合
+
+# 支出データ管理
 def load_data():
     if not os.path.exists(DATA_FILE):
         return {}
@@ -42,6 +55,7 @@ def save_data(data):
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# 毎月1日に集計して通知しリセット
 def notify_and_reset():
     data = load_data()
     now = datetime.now()
@@ -53,16 +67,9 @@ def notify_and_reset():
             continue
 
         user_list = []
-        for user_id, user_info in info["users"].items():
-            try:
-                if group_id:
-                    profile = line_bot_api.get_group_member_profile(group_id, user_id) if user_id != "不明なユーザー" else None
-                    user_name = profile.display_name if profile else user_id
-                else:
-                    user_name = user_id
-            except:
-                user_name = user_id
-            user_list.append((user_name, user_info))
+        for user_key, user_info in info["users"].items():
+            # user_key はニックネームかuser_id
+            user_list.append((user_key, user_info))
         user_list.sort(key=lambda x: x[0])
 
         for user_name, user_info in user_list:
@@ -74,23 +81,16 @@ def notify_and_reset():
             message = f"【{last_month_str}結果発表】\n{user_name}さんの今月の支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
             line_bot_api.push_message(group_id, TextSendMessage(text=message))
 
-        for user_id in info["users"]:
-            info["users"][user_id]["total"] = 0
-            info["users"][user_id]["details"] = {}
+        # リセット
+        for user_key in info["users"]:
+            info["users"][user_key]["total"] = 0
+            info["users"][user_key]["details"] = {}
 
     save_data(data)
 
 def clear_data():
     with open(DATA_FILE, "w", encoding="utf-8") as f:
         json.dump({}, f, ensure_ascii=False, indent=2)
-
-async def debug_notify():
-    try:
-        while True:
-            await asyncio.sleep(300)
-            notify_and_reset()
-    except asyncio.CancelledError:
-        print("Debug task cancelled.")
 
 @app.post("/callback")
 async def callback(request: Request):
@@ -102,25 +102,44 @@ async def callback(request: Request):
         return "Invalid signature", 400
     return "OK"
 
+# グループ参加時にニックネーム入力を促す
+@handler.add(MemberJoinedEvent)
+def handle_member_join(event):
+    group_id = event.source.group_id
+    for member in event.joined.members:
+        user_id = member.user_id
+        if user_id not in nicknames:
+            waiting_for_nickname.add(user_id)
+            line_bot_api.push_message(
+                group_id,
+                TextSendMessage(text=f"{user_id}さん、ニックネームを教えてください！このチャットで返信してください。")
+            )
+
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    global debug_mode, debug_task
-
     text = event.message.text.strip()
     lines = text.split("\n")
 
     user_id = event.source.user_id
     group_id = getattr(event.source, "group_id", None)
 
-    user_name = "不明なユーザー"
-    try:
-        if group_id:
-            profile = line_bot_api.get_group_member_profile(group_id, user_id)
-        else:
-            profile = line_bot_api.get_profile(user_id)
-        user_name = profile.display_name
-    except:
-        pass
+    # ニックネーム未登録ならニックネームとして登録
+    if user_id in waiting_for_nickname:
+        # ニックネーム重複チェック（シンプル）
+        if text in nicknames.values():
+            reply = f"そのニックネームはすでに使われています。別のニックネームを教えてください。"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
+
+        nicknames[user_id] = text
+        save_nicknames(nicknames)
+        waiting_for_nickname.remove(user_id)
+        reply = f"ニックネーム「{text}」を登録しました！ありがとうございます。"
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
+
+    # user_idの代わりにニックネームをキーとして使用
+    user_key = nicknames.get(user_id, user_id)
 
     if len(lines) >= 1:
         first_line = lines[0].strip()
@@ -129,20 +148,20 @@ def handle_message(event):
 
     if first_line == "debug":
         notify_and_reset()
-        reply = f"{user_name}さん、集計を実施しました！（デバッグモードではありません）"
-        
+        reply = f"{user_key}さん、集計を実施しました！（デバッグモードはありません）"
+
     elif first_line == "check":
         data = load_data()
-        if group_id and group_id in data and "users" in data[group_id] and user_id in data[group_id]["users"]:
-            user_info = data[group_id]["users"][user_id]
+        if group_id and group_id in data and "users" in data[group_id] and user_key in data[group_id]["users"]:
+            user_info = data[group_id]["users"][user_key]
             total = user_info.get("total", 0)
             details = user_info.get("details", {})
             detail_lines = [
                 f"　- {k}: {v['total']:,} 円（{v['count']} 回）" for k, v in details.items()
             ]
-            reply = f"{user_name}さん、あなたの支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
+            reply = f"{user_key}さん、あなたの支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
         else:
-            reply = f"{user_name}さん、まだ支出の記録がありません、、"
+            reply = f"{user_key}さん、まだ支出の記録がありません、、"
 
     elif first_line == "check_all" and group_id:
         data = load_data()
@@ -151,13 +170,8 @@ def handle_message(event):
         else:
             users = data[group_id]["users"]
             user_list = []
-            for uid, info in users.items():
-                try:
-                    profile = line_bot_api.get_group_member_profile(group_id, uid) if uid != "不明なユーザー" else None
-                    uname = profile.display_name if profile else uid
-                except:
-                    uname = uid
-                user_list.append((uname, info))
+            for key, info in users.items():
+                user_list.append((key, info))
             user_list.sort(key=lambda x: x[0])
 
             messages = []
@@ -174,7 +188,7 @@ def handle_message(event):
     elif first_line == "catch" and group_id:
         pasted_text = "\n".join(lines[1:]).strip()
         if not pasted_text:
-            reply = f"{user_name}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください、、"
+            reply = f"{user_key}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
@@ -186,16 +200,10 @@ def handle_message(event):
 
         user_blocks = re.split(r'\n(?=[^\s].+ さん: \d[\d,]* 円)', pasted_text)
 
+        # 表示名→user_key のマッピング構築
         uid_name_map = {}
-        try:
-            members = data[group_id]["users"].keys()
-            for uid in members:
-                if uid != "不明なユーザー":
-                    profile = line_bot_api.get_group_member_profile(group_id, uid)
-                    uname = profile.display_name
-                    uid_name_map[uname] = uid
-        except:
-            pass
+        for key in data[group_id]["users"].keys():
+            uid_name_map[key] = key
 
         total_added = 0
         for block in user_blocks:
@@ -210,7 +218,7 @@ def handle_message(event):
             uname = m.group(1)
             total = int(m.group(2).replace(",", ""))
 
-            uid = uid_name_map.get(uname, uname)
+            uid = uid_name_map.get(uname, "不明なユーザー")
 
             if uid not in data[group_id]["users"]:
                 data[group_id]["users"][uid] = {"total": 0, "details": {}}
@@ -231,27 +239,25 @@ def handle_message(event):
 
         save_data(data)
 
-        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
-
-    
+        reply = f"{user_key}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
 
     elif len(lines) >= 2:
-        first_line = lines[0].strip()
-        usage = lines[1].strip()
+        usage = lines[0].strip()  # 1行目：品目（用途）
+        amount_line = lines[1].strip()  # 2行目：金額
         third_line = lines[2].strip() if len(lines) >= 3 else ""
 
-        if not first_line.isdigit():
-            reply = f"{user_name}さん、1行目は半角数字で金額を入力してください、、"
+        if not amount_line.isdigit():
+            reply = f"{user_key}さん、2行目は半角数字で金額を入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
         if not usage:
-            reply = f"{user_name}さん、2行目は使用用途を必ず入力してください、、"
+            reply = f"{user_key}さん、1行目は使用用途を必ず入力してください、、"
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
             return
 
         share_count = int(third_line) if third_line.isdigit() and int(third_line) > 0 else 1
 
-        amount = int(first_line)
+        amount = int(amount_line)
         share_amount = math.ceil(amount / share_count)
 
         data = load_data()
@@ -259,10 +265,10 @@ def handle_message(event):
             data[group_id] = {"users": {}}
         if "users" not in data[group_id]:
             data[group_id]["users"] = {}
-        if user_id not in data[group_id]["users"]:
-            data[group_id]["users"][user_id] = {"total": 0, "details": {}}
+        if user_key not in data[group_id]["users"]:
+            data[group_id]["users"][user_key] = {"total": 0, "details": {}}
 
-        user_data = data[group_id]["users"][user_id]
+        user_data = data[group_id]["users"][user_key]
         user_data["total"] += share_amount
 
         details = user_data["details"]
@@ -275,24 +281,24 @@ def handle_message(event):
 
         if share_count > 1:
             reply = (
-                f"{user_name}さん、{amount:,} 円を {share_count} 人で割り勘し、"
-                f"1人あたり {share_amount:,} 円（用途：{usage}）で記録しました！"
+                f"{user_key}さん、「{usage}」で {amount:,} 円を {share_count} 人で割り勘し、"
+                f"1人あたり {share_amount:,} 円で記録しました！"
             )
         else:
-            reply = f"{user_name}さん、支出金額 {share_amount:,} 円（用途：{usage}）で記録しました！"
+            reply = f"{user_key}さん、「{usage}」の支出金額 {share_amount:,} 円で記録しました！"
 
     elif first_line == "help":
         reply = (
             "📘 【記載方法】\n"
-            "・1行目: 支出金額_半角数字のみ（必須）\n"
-            "・2行目: 使用用途_自由文字（必須）\n"
+            "・1行目: 使用用途_自由文字（必須）\n"
+            "・2行目: 支出金額_半角数字のみ（必須）\n"
             "・3行目: 割り勘人数_半角数字のみ（任意）\n"
             "📘 【コマンド一覧】\n"
             "・check: 自分の途中結果を確認\n"
             "・check_all: グループ全体の途中結果を確認\n"
-            "・debug: 5分おきに集計（ON/OFF切替）"
+            "・debug: 集計実行\n"
+            "※グループ参加時にニックネームを聞かれます。"
         )
-
     else:
         return
 
