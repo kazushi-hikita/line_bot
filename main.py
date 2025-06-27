@@ -413,8 +413,10 @@ def handle_message(event):
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 @app.get("/ping_html", response_class=HTMLResponse)
+@app.head("/ping_html", response_class=HTMLResponse)
 async def ping_html():
     return "<h1>I'm alive!</h1>"
+
 
 scheduler = AsyncIOScheduler()
 
