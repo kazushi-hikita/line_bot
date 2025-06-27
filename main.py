@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks
 from fastapi.responses import HTMLResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -21,6 +22,7 @@ except RuntimeError:
 
 app = FastAPI()
 
+# LINEトークン読み込み
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 
@@ -28,6 +30,8 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 DATA_FILE = "group_data.json"
+debug_mode = False
+debug_task = None
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -78,6 +82,18 @@ def notify_and_reset():
 
     save_data(data)
 
+def clear_data():
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump({}, f, ensure_ascii=False, indent=2)
+
+async def debug_notify():
+    try:
+        while True:
+            await asyncio.sleep(300)
+            notify_and_reset()
+    except asyncio.CancelledError:
+        print("Debug task cancelled.")
+
 @app.post("/callback")
 async def callback(request: Request):
     signature = request.headers.get("X-Line-Signature")
@@ -90,6 +106,8 @@ async def callback(request: Request):
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
+    global debug_mode, debug_task
+
     text = event.message.text.strip()
     lines = text.split("\n")
 
@@ -111,9 +129,172 @@ def handle_message(event):
     else:
         first_line = ""
 
-    data = load_data()
+    # --- 取り消しコマンド対応 ---
+    if first_line == "取り消し" and group_id:
+        data = load_data()
+        if group_id not in data or "users" not in data[group_id] or user_id not in data[group_id]["users"]:
+            reply = f"{user_name}さん、取り消せる記録がありません、、"
+        else:
+            users = data[group_id]["users"]
+            user_data = users[user_id]
+            history = user_data.get("history", [])
+            if not history:
+                reply = f"{user_name}さん、取り消せる記録がありません、、"
+            else:
+                last = history.pop()
+                usage = last["usage"]
+                amount = last["amount"]
+                count = last["count"]
+    
+                # 自分の合計・詳細から減算
+                user_data["total"] -= amount
+                if usage in user_data["details"]:
+                    user_data["details"][usage]["total"] -= amount
+                    user_data["details"][usage]["count"] -= count
+                    if user_data["details"][usage]["count"] <= 0:
+                        del user_data["details"][usage]
+    
+                # --- もし割り勘で複数人に同額加算されていた場合 ---
+                shared_users = []
+                for uid, udata in users.items():
+                    if uid == user_id:
+                        continue
+                    if "history" in udata and udata["history"]:
+                        if udata["history"][-1]["usage"] == usage and udata["history"][-1]["amount"] == amount:
+                            # 一致する履歴があれば削除
+                            shared_users.append(uid)
+                            udata["history"].pop()
+                            udata["total"] -= amount
+                            if usage in udata["details"]:
+                                udata["details"][usage]["total"] -= amount
+                                udata["details"][usage]["count"] -= count
+                                if udata["details"][usage]["count"] <= 0:
+                                    del udata["details"][usage]
+    
+                save_data(data)
+    
+                if shared_users:
+                    reply = (
+                        f"{user_name}さん、割り勘として登録された「{usage}」 {amount:,} 円の記録を "
+                        f"{len(shared_users)+1}人分まとめて取り消しました。"
+                    )
+                else:
+                    reply = (
+                        f"{user_name}さん、直近の支出「{usage}」 {amount:,} 円の登録を取り消しました。"
+                    )
+    
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+        return
 
-    if first_line == "today":
+
+    if first_line == "debug":
+        notify_and_reset()
+
+    elif first_line == "check":
+        data = load_data()
+        if group_id and group_id in data and "users" in data[group_id] and user_id in data[group_id]["users"]:
+            user_info = data[group_id]["users"][user_id]
+            total = user_info.get("total", 0)
+            details = user_info.get("details", {})
+            detail_lines = [
+                f"　- {k}: {v['total']:,} 円（{v['count']} 回）" for k, v in details.items()
+            ]
+            reply = f"{user_name}さん、あなたの支出は {total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
+        else:
+            reply = f"{user_name}さん、まだ支出の記録がありません、、"
+
+    elif first_line == "check_all" and group_id:
+        data = load_data()
+        if group_id not in data or "users" not in data[group_id] or not data[group_id]["users"]:
+            reply = "まだ支出の記録がありません、、"
+        else:
+            users = data[group_id]["users"]
+            user_list = []
+            for uid, info in users.items():
+                try:
+                    profile = line_bot_api.get_group_member_profile(group_id, uid) if uid != "不明なユーザー" else None
+                    uname = profile.display_name if profile else uid
+                except:
+                    uname = uid
+                user_list.append((uname, info))
+            user_list.sort(key=lambda x: x[0])
+
+            messages = []
+            for uname, info in user_list:
+                total = info.get("total", 0)
+                details = info.get("details", {})
+                detail_lines = [
+                    f"　- {k}: {v['total']:,} 円（{v['count']} 回）" for k, v in details.items()
+                ]
+                messages.append(f"{uname} さん: {total:,} 円\n" + "\n".join(detail_lines))
+
+            reply = "【途中結果】\n" + "\n\n".join(messages)
+
+    elif first_line == "catch" and group_id:
+        pasted_text = "\n".join(lines[1:]).strip()
+        if not pasted_text:
+            reply = f"{user_name}さん、catchコマンドの2行目以降にcheck_allの結果をペーストしてください、、"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
+
+        data = load_data()
+        if group_id not in data:
+            data[group_id] = {"users": {}}
+        if "users" not in data[group_id]:
+            data[group_id]["users"] = {}
+
+        user_blocks = re.split(r'\n(?=[^\s].+ さん: \d[\d,]* 円)', pasted_text)
+
+        # 表示名→user_id のマッピング構築
+        uid_name_map = {}
+        try:
+            members = data[group_id]["users"].keys()
+            for uid in members:
+                if uid != "不明なユーザー":
+                    profile = line_bot_api.get_group_member_profile(group_id, uid)
+                    uname = profile.display_name
+                    uid_name_map[uname] = uid
+        except:
+            pass
+
+        total_added = 0
+        for block in user_blocks:
+            lines_block = block.strip().split("\n")
+            if not lines_block:
+                continue
+
+            header = lines_block[0].strip()
+            m = re.match(r"(.+?) さん: ([\d,]+) 円", header)
+            if not m:
+                continue
+            uname = m.group(1)
+            total = int(m.group(2).replace(",", ""))
+
+            uid = uid_name_map.get(uname, "不明なユーザー")
+
+            if uid not in data[group_id]["users"]:
+                data[group_id]["users"][uid] = {"total": 0, "details": {}, "history": []}
+            data[group_id]["users"][uid]["total"] += total
+            total_added += total
+
+            details = data[group_id]["users"][uid]["details"]
+
+            for detail_line in lines_block[1:]:
+                dm = re.match(r"[-ー・\s]*\s*(.+?):\s*([\d,]+)\s*円", detail_line.strip())
+                if dm:
+                    usage = dm.group(1)
+                    amount = int(dm.group(2).replace(",", ""))
+                    if usage not in details:
+                        details[usage] = {"total": 0, "count": 0}
+                    details[usage]["total"] += amount
+                    details[usage]["count"] += 1
+
+        save_data(data)
+
+        reply = f"{user_name}さん、catchコマンドのデータを取り込みました。合計 {total_added:,} 円を現在の記録に加算しました！"
+
+    elif first_line == "today":
+        data = load_data()
         if group_id and group_id in data and "users" in data[group_id] and user_id in data[group_id]["users"]:
             user_info = data[group_id]["users"][user_id]
             today = datetime.now().date()
@@ -144,21 +325,138 @@ def handle_message(event):
                 detail_lines = [
                     f"　- {k}: {v['total']:,} 円（{v['count']} 回）" for k, v in today_details.items()
                 ]
-                reply = f"{user_name}さん、本日の支出合計は {today_total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
+                reply = f"{user_name}さん、**本日の支出合計**は {today_total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
         else:
             reply = f"{user_name}さん、まだ支出の記録がありません、、"
 
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+    
+    elif len(lines) >= 2:
+        amount_line_raw = lines[0].strip()  # 1行目：金額
+        usage = lines[1].strip()            # 2行目：品目（用途）
+        third_line = lines[2].strip() if len(lines) >= 3 else ""
+    
+        # マイナスも許可（--1000形式は特別扱い）
+        is_double_minus = amount_line_raw.startswith("--")
+        amount_line = amount_line_raw.lstrip("-")
+        if not re.match(r"^\d+$", amount_line):
+            reply = "1行目に半角数字で金額、2行目に用途を入力してください、、"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
+        if not usage:
+            reply = "1行目に半角数字で金額、2行目に用途を入力してください、、"
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+            return
+    
+        amount = -int(amount_line) if amount_line_raw.startswith("-") else int(amount_line)
+
+        data = load_data()
+        if group_id not in data:
+            data[group_id] = {"users": {}}
+        if "users" not in data[group_id]:
+            data[group_id]["users"] = {}
+
+        users = data[group_id]["users"]
+
+        if third_line == "割り勘":
+            user_ids = list(users.keys())
+            num_users = len(user_ids)
+            if num_users == 0:
+                reply = "このグループにはまだユーザーが登録されていません、、"
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
+                return
+            share_amount = math.ceil(amount / num_users)
+
+            for uid in user_ids:
+                if uid not in users:
+                    users[uid] = {"total": 0, "details": {}, "history": []}
+                users[uid]["total"] += share_amount
+
+                details = users[uid]["details"]
+                if usage not in details:
+                    details[usage] = {"total": 0, "count": 0}
+                details[usage]["total"] += share_amount
+
+                # マイナス金額は回数に含めない、--は1減らす
+                count_change = -1 if is_double_minus else (0 if share_amount < 0 else 1)
+                details[usage]["count"] += count_change
+
+                users[uid]["history"].append({
+                    "usage": usage,
+                    "amount": share_amount,
+                    "count": count_change,
+                    "timestamp": datetime.now().isoformat()
+                })
+
+            save_data(data)
+
+            reply = (
+                f"{user_name}さん、「{usage}」で {amount:,} 円を "
+                f"{num_users} 人で割り勘し、1人あたり {share_amount:,} 円で記録しました！"
+            )
+
+        else:
+            share_count = int(third_line) if third_line.isdigit() and int(third_line) > 0 else 1
+            share_amount = math.ceil(amount / share_count)
+
+            if user_id not in users:
+                users[user_id] = {"total": 0, "details": {}, "history": []}
+
+            user_data = users[user_id]
+            user_data["total"] += share_amount
+
+            details = user_data["details"]
+            if usage not in details:
+                details[usage] = {"total": 0, "count": 0}
+            details[usage]["total"] += share_amount
+
+            # マイナス金額はカウントに含めない、--は-1
+            count_change = -1 if is_double_minus else (0 if share_amount < 0 else 1)
+            details[usage]["count"] += count_change
+
+            user_data["history"].append({
+                "usage": usage,
+                "amount": share_amount,
+                "count": count_change,
+                "timestamp": datetime.now().isoformat()
+            })
+
+            save_data(data)
+
+            if share_count > 1:
+                reply = (
+                    f"{user_name}さん、「{usage}」で {amount:,} 円を {share_count} 人で割り勘し、"
+                    f"1人あたり {share_amount:,} 円で記録しました！"
+                )
+            else:
+                reply = f"{user_name}さん、「{usage}」の支出金額 {share_amount:,} 円で記録しました！"
+
+    elif first_line == "help":
+        reply = (
+            "📘 【記載方法】\n"
+            "・1行目: 支出金額_半角数字（必須）\n"
+            "・2行目: 使用用途_自由文字（必須）\n"
+            "・3行目: 「割り勘」と入力で当月入力履歴のある人に振り分け（任意）\n"
+            "📘 【コマンド一覧】\n"
+            "・支出金額「-」付与: 減算\n"
+            "・支出金額「--」付与: 減算かつ加算回数を一つデクリメント\n"
+            "・取り消し: 1件前の登録を取り消す\n"
+            "・check: 自分の途中結果を確認\n"
+            "・check_all: グループ全体の途中結果を確認\n"
+            "・today: 今日一日の加算結果をcheck\n"
+            "・debug: 結果発表のデバッグ(全記載内容のクリア)\n"
+            "・catch: バックアップの取得デバッグ"
+        )
+
+    else:
         return
 
-    # この後に既存の check や 登録処理などを続けて記述してください
-    # 各履歴追加の箇所には以下のように timestamp を追加するのを忘れずに：
-    # "timestamp": datetime.now().isoformat()
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
 @app.get("/ping_html", response_class=HTMLResponse)
 @app.head("/ping_html", response_class=HTMLResponse)
 async def ping_html():
     return "<h1>I'm alive!</h1>"
+
 
 scheduler = AsyncIOScheduler()
 
