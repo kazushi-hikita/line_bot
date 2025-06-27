@@ -325,7 +325,7 @@ def handle_message(event):
                 detail_lines = [
                     f"　- {k}: {v['total']:,} 円（{v['count']} 回）" for k, v in today_details.items()
                 ]
-                reply = f"{user_name}さん、**本日の支出合計**は {today_total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
+                reply = f"{user_name}さん、本日の支出合計は {today_total:,} 円です！\n内訳:\n" + "\n".join(detail_lines)
         else:
             reply = f"{user_name}さん、まだ支出の記録がありません、、"
 
