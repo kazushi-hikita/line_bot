@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi import BackgroundTasks
+from fastapi.responses import HTMLResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
@@ -411,9 +412,9 @@ def handle_message(event):
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
 
-@app.get("/uptimerobot")
-async def root():
-    return {"status": "ok"}
+@app.get("/ping_html", response_class=HTMLResponse)
+async def ping_html():
+    return "<h1>I'm alive!</h1>"
 
 scheduler = AsyncIOScheduler()
 
