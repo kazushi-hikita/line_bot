@@ -297,7 +297,9 @@ def handle_message(event):
         data = load_data()
         if group_id and group_id in data and "users" in data[group_id] and user_id in data[group_id]["users"]:
             user_info = data[group_id]["users"][user_id]
-            today = datetime.now().date()
+            JST = timezone(timedelta(hours=9))
+            now_jst = datetime.now(JST)
+            today = (now_jst - timedelta(hours=7)).date()
             today_total = 0
             today_details = {}
 
@@ -463,4 +465,5 @@ scheduler = AsyncIOScheduler()
 @app.on_event("startup")
 async def startup_event():
     scheduler.start()
-    scheduler.add_job(notify_and_reset, CronTrigger(day=1, hour=9, minute=0))
+    scheduler.add_job(notify_and_reset, CronTrigger(day=1, hour=22, minute=0))
+
