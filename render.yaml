@@ -7,6 +7,4 @@ services:
     startCommand: "gunicorn main:app -w 1 -k uvicorn.workers.UvicornWorker"
     envVars:
       - key: LINE_CHANNEL_SECRET
-        value: "a34ea1d8ce696bb93c7324e1251aa50d"
       - key: LINE_CHANNEL_ACCESS_TOKEN
-        value: "haZbksuh6JfRB3rUza3IAryzw7xs97lv5pxJqkLuEGVGFoJB5CMrQR6hku32KbMrrAeIlMUGcNl77jlZGOF74N/YnEE1M3YKFiW9nxb7Q3NMUQBKWHi1qQ6WrG17f56bnQvXHRoTzXQknOzBxUCmBQdB04t89/1O/w1cDnyilFU="
